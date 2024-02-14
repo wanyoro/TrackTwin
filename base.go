@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"strings"
 
-	//"strings"erer
+	//"strings"
 
 	"github.com/zmb3/spotify"
 	"golang.org/x/oauth2"
+	"github.com/jung-kurt/gofpdf"
 	//"golang.org/x/oauth2/clientcredentials"
 )
 
@@ -42,47 +43,59 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	//http.Redirect(w, r, auth.AuthURL(state), http.StatusFound)
 }
 
-
-
-func getUserLikedSongs(client *spotify.Client) (map[string][]string, error) {
-	// Use the Spotify API client to retrieve user's liked songs
-	// This example groups songs by artist for a more organized display.
-	// Adjust based on the Spotify API's actual structure.
-	// For Spotify, you might want to use the /v1/me/tracks endpoint
-	// and extract the track names, artists, or IDs from the response.
-	// Note: This is a simplified example and might not work as-is.
-
-	// Example: Get the current user's saved tracks
-	tracks, err := client.CurrentUsersTracks()
-	if err != nil {
-		return nil, err
-	}
+func getUserLikedSongs(token *oauth2.Token) (map[string][]string, error) {
+	auth := spotify.NewAuthenticator(redirectURI, spotify.ScopeUserLibraryRead)
+	client := auth.NewClient(token)
 
 	// Map to store songs grouped by artist
 	songsByArtist := make(map[string][]string)
 
-	// Iterate through tracks and group by artist
-	for _, item := range tracks.Tracks {
-		artists := make([]string, len(item.FullTrack.Artists))
-		for i, artist := range item.FullTrack.Artists {
-			artists[i] = artist.Name
+	// Set the limit for the number of tracks per page
+	limit := 50
+
+	// Retrieve the first page of liked songs
+	tracks, err := client.CurrentUsersTracksOpt(&spotify.Options{Limit: &limit})
+	if err != nil {
+		return nil, err
+	}
+
+	// Iterate through the pages
+	for {
+		// Iterate through tracks and group by artist
+		for _, item := range tracks.Tracks {
+			artists := make([]string, len(item.FullTrack.Artists))
+			for i, artist := range item.FullTrack.Artists {
+				artists[i] = artist.Name
+			}
+
+			// Combine artists and track name for display
+			artistAndTrack := fmt.Sprintf("%s - %s", strings.Join(artists, ", "), item.FullTrack.Name)
+
+			// Check if the artistAndTrack already exists in the map
+			if _, exists := songsByArtist[artistAndTrack]; !exists {
+				// If not, initialize a new slice for that artistAndTrack
+				songsByArtist[artistAndTrack] = make([]string, 0)
+			}
+
+			// Append to the slice
+			songsByArtist[artistAndTrack] = append(songsByArtist[artistAndTrack], artistAndTrack)
 		}
 
-		// Combine artists and track name for display
-		artistAndTrack := fmt.Sprintf("%s - %s", strings.Join(artists, ", "), item.FullTrack.Name)
-
-		// Check if the artistAndTrack already exists in the map
-		if _, exists := songsByArtist[artistAndTrack]; !exists {
-			// If not, initialize a new slice for that artistAndTrack
-			songsByArtist[artistAndTrack] = make([]string, 0)
+		// Check if there are more pages
+		if tracks.Next == "" {
+			break
 		}
 
-		// Append to the slice
-		songsByArtist[artistAndTrack] = append(songsByArtist[artistAndTrack], artistAndTrack)
+		// Retrieve the next page using the URL in the Next field
+		err := client.NextPage(tracks)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return songsByArtist, nil
 }
+
 func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	token, err := oauthConfig.Exchange(r.Context(), code)
@@ -91,17 +104,48 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	}
 	// Use the access token to make requests to the Spotify API
-	client := spotify.Authenticator{}.NewClient(token)
-	userLikedSongs, err := getUserLikedSongs(&client)
+	//client := oauthConfig.Client(r.Context(), token)
+	userLikedSongs, err := getUserLikedSongs(token)
 	if err != nil {
 		http.Error(w, "Failed to get user liked songs", http.StatusInternalServerError)
 		log.Fatal(err)
 	}
+
+	err = exportToPDF(userLikedSongs)
+	if err != nil {
+		http.Error(w, "Failed to export to PDF", http.StatusInternalServerError)
+		log.Fatal(err)
+	}
 	//ch <- &client
-	fmt.Fprintf(w, "User Liked Songs:\n")
-	for artistAndTrack, songs := range userLikedSongs{
+	fmt.Fprintf(w, "User Liked Songs exported to PDF:\n")
+	for artistAndTrack, songs := range userLikedSongs {
 		fmt.Fprintf(w, "- %s(%d songs)\n", artistAndTrack, len(songs))
 	}
+}
+
+func exportToPDF(songsByArtist map[string][]string) error {
+	pdf := gofpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+
+	//Font
+	pdf.SetFont("Arial", "B", 16)
+
+	//Add Title
+	pdf.Cell(40, 10, "User Liked Songs")
+
+	//Set font for songlist
+	pdf.SetFont("Arial", "", 12)
+
+	//add songs to pdf
+	for artistAndTrack, _ := range songsByArtist {
+		pdf.Cell(40, 10, fmt.Sprintf("- %s (%d songs)", artistAndTrack))
+		pdf.Ln(-1)
+	}
+	err := pdf.OutputFileAndClose("user_liked_songs.pdf")
+	if err!= nil{
+		return err
+	}
+	return nil
 }
 func main() {
 	http.HandleFunc("/login", loginHandler)
@@ -109,11 +153,4 @@ func main() {
 	fmt.Println("Server is starting on :8001...")
 	log.Fatal(http.ListenAndServe(":8001", nil))
 
-	// url := auth.AuthURL(state)
-	// fmt.Printf("Please log in to spotify by visiting %v\n", url)
-
-	// select {
-	// case client := <-ch:
-	// 	getUserLikedSongs(client)
-	// }
 }
