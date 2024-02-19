@@ -11,9 +11,9 @@ import (
 
 	//"strings"
 
+	"github.com/jung-kurt/gofpdf"
 	"github.com/zmb3/spotify"
 	"golang.org/x/oauth2"
-	"github.com/jung-kurt/gofpdf"
 	//"golang.org/x/oauth2/clientcredentials"
 )
 
@@ -96,6 +96,59 @@ func getUserLikedSongs(token *oauth2.Token) (map[string][]string, error) {
 	return songsByArtist, nil
 }
 
+func getUser2LikedSongs(token *oauth2.Token) (map[string][]string, error){
+	auth := spotify.NewAuthenticator(redirectURI, spotify.ScopeUserLibraryRead)
+	client := auth.NewClient(token)
+
+	// Map to store songs grouped by artist
+	songsByArtist := make(map[string][]string)
+
+	// Set the limit for the number of tracks per page
+	limit := 50
+
+	// Retrieve the first page of liked songs
+	tracks, err := client.CurrentUsersTracksOpt(&spotify.Options{Limit: &limit})
+	if err != nil {
+		return nil, err
+	}
+
+	// Iterate through the pages
+	for {
+		// Iterate through tracks and group by artist
+		for _, item := range tracks.Tracks {
+			artists := make([]string, len(item.FullTrack.Artists))
+			for i, artist := range item.FullTrack.Artists {
+				artists[i] = artist.Name
+			}
+
+			// Combine artists and track name for display
+			artistAndTrack := fmt.Sprintf("%s - %s", strings.Join(artists, ", "), item.FullTrack.Name)
+
+			// Check if the artistAndTrack already exists in the map
+			if _, exists := songsByArtist[artistAndTrack]; !exists {
+				// If not, initialize a new slice for that artistAndTrack
+				songsByArtist[artistAndTrack] = make([]string, 0)
+			}
+
+			// Append to the slice
+			songsByArtist[artistAndTrack] = append(songsByArtist[artistAndTrack], artistAndTrack)
+		}
+
+		// Check if there are more pages
+		if tracks.Next == "" {
+			break
+		}
+
+		// Retrieve the next page using the URL in the Next field
+		err := client.NextPage(tracks)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return songsByArtist, nil
+}
+
 func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	token, err := oauthConfig.Exchange(r.Context(), code)
@@ -118,8 +171,27 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	//ch <- &client
 	fmt.Fprintf(w, "User Liked Songs exported to PDF:\n")
-	for artistAndTrack, songs := range userLikedSongs {
-		fmt.Fprintf(w, "- %s(%d songs)\n", artistAndTrack, len(songs))
+	for artistAndTrack, _ := range userLikedSongs {
+		fmt.Fprintf(w, "- %s\n", artistAndTrack)
+	}
+}
+
+func getUser2LikedSongsHandler (w http.ResponseWriter, r*http.Request){
+	code:= r.URL.Query().Get("code")
+	token,err := oauthConfig.Exchange(r. Context(), code)
+	if err!= nil{
+		http.Error(w, "Couldn,t get token", http.StatusForbidden)
+		log.Fatal(err)
+	}
+
+	user2LikedSongs, err:= getUser2LikedSongs(token)
+	if err!= nil{
+		http.Error(w, "Failed to get user 2 liked songs", http.StatusInternalServerError)
+		log.Fatal(err)
+	}
+	fmt.Fprintf(w, "User 2 Liked Songs:\n")
+	for artistAndTrack, _ := range user2LikedSongs{
+		fmt.Fprintf(w, "-s\n", artistAndTrack)
 	}
 }
 
@@ -138,19 +210,61 @@ func exportToPDF(songsByArtist map[string][]string) error {
 
 	//add songs to pdf
 	for artistAndTrack, _ := range songsByArtist {
-		pdf.Cell(40, 10, fmt.Sprintf("- %s (%d songs)", artistAndTrack))
+		pdf.Cell(40, 10, fmt.Sprintf("- %s", artistAndTrack))
 		pdf.Ln(-1)
 	}
 	err := pdf.OutputFileAndClose("user_liked_songs.pdf")
-	if err!= nil{
+	if err != nil {
 		return err
 	}
 	return nil
 }
-func main() {
-	http.HandleFunc("/login", loginHandler)
-	http.HandleFunc("/callback", callbackHandler)
-	fmt.Println("Server is starting on :8001...")
-	log.Fatal(http.ListenAndServe(":8001", nil))
 
+func compareUsersHandler(w http.ResponseWriter, r*http.Request){
+	token1, err := oauthConfig.Exchange(r.Context(), r.URL.Query().Get("code1"))
+	if err!= nil{
+		http.Error(w, "Couldn't get token for user 1", http.StatusForbidden)
+		log.Fatal(err)
+		return
+	}
+	token2, err:= oauthConfig.Exchange(r.Context(), r.URL.Query().Get("code2"))
+	if err!= nil{
+		http.Error(w, "Couldn't get token for user 2", http.StatusForbidden)
+		log.Fatal(err)
+		return
+	}
+	//Get liked songs for each user
+	likedSongs1, err:= getUserLikedSongs(token1)
+	if err!= nil{
+		http.Error(w, "Failed to get liked songs for user 1", http.StatusInternalServerError)
+		log.Fatal(err)
+		return
+	}
+	likedSongs2, err :=getUser2LikedSongs(token2)
+	if err!= nil{
+		http.Error(w, "Failed to get liked songs for user 2", http.StatusInternalServerError)
+		log.Fatal(err)
+		return
+	} 
+	//Compare liked songs
+	commonLikedSongs:= make(map[string]struct{})
+	for song := range likedSongs1{
+		if _, exists := likedSongs2[song]; exists {
+			commonLikedSongs[song]= struct{}{}
+		}
+	}
+
+	//Return common liked songs in the response
+	fmt.Fprintf(w, "Common liked songs between User1 and User 2:\n")
+	for song := range commonLikedSongs{
+		fmt.Fprintf(w, "-%s\n", song)
+	}
+}
+func main() {
+    http.HandleFunc("/login", loginHandler)
+    http.HandleFunc("/callback", callbackHandler)
+    http.HandleFunc("/user2LikedSongs", getUser2LikedSongsHandler)
+    http.HandleFunc("/compareUsers", compareUsersHandler)
+    fmt.Println("Server is starting on :8001...")
+    log.Fatal(http.ListenAndServe(":8001", nil))
 }
